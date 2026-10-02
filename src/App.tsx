@@ -3,9 +3,10 @@ import {
   ArrowLeftOutlined, ArrowRightOutlined, BranchesOutlined, CheckOutlined, CloseOutlined,
   CommentOutlined, DiffOutlined, DeleteOutlined, FileDoneOutlined, FileTextOutlined,
   HistoryOutlined, LockOutlined, MenuFoldOutlined, MessageOutlined, PlusOutlined,
-  RedoOutlined, SaveOutlined, SendOutlined, SwapOutlined, UndoOutlined, UnlockOutlined, UserSwitchOutlined,
+  RedoOutlined, ReloadOutlined, SaveOutlined, SendOutlined, SyncOutlined,
+  SwapOutlined, UndoOutlined, UnlockOutlined, UserSwitchOutlined, CloudUploadOutlined, DatabaseOutlined,
 } from '@ant-design/icons'
-import { Alert, Badge, Button, Card, Checkbox, Divider, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, message } from 'antd'
+import { Alert, Badge, Button, Card, Checkbox, Divider, Empty, Input, Modal, Radio, Segmented, Select, Space, Switch, Tag, Tooltip, message } from 'antd'
 import { submitRemotePatch } from './services/mockApi'
 import { useReviewStore } from './store/review'
 import type { Comment, CommentType, Paragraph, Role } from './types'
@@ -21,9 +22,11 @@ const formatDate = (value: number) => new Date(value).toLocaleString('zh-CN', { 
 export default function App() {
   const {
     role, paragraphs, comments, versions, selectedParagraphId, commentFilter, revisionMode, dirty, conflicts,
+    libraryParagraphs, libraryVersions, syncPhase, syncNotices, pushFailureArmed,
     setRole, selectParagraph, setCommentFilter, setRevisionMode, updateParagraph, addComment, replyComment,
     resolveSuggestion, mergeComment, toggleLock, createVersion, addConflict, resolveConflict, dismissConflict,
     undo, redo, save, resetDemo,
+    loadLibrary, finalizeInLibrary, publishLibraryVersion, syncWithLibrary, retrySync, dismissSyncNotice, setPushFailureArmed,
   } = useReviewStore()
   const [composerOpen, setComposerOpen] = useState(false)
   const [commentType, setCommentType] = useState<CommentType>('comment')
@@ -35,8 +38,14 @@ export default function App() {
   const [versionA, setVersionA] = useState(versions[1]?.id ?? versions[0]?.id)
   const [versionB, setVersionB] = useState(versions[0]?.id)
   const [versionLabel, setVersionLabel] = useState('')
+  const [libraryOpen, setLibraryOpen] = useState(false)
 
   const selected = paragraphs.find((paragraph) => paragraph.id === selectedParagraphId) ?? paragraphs[0]
+  const pendingSyncCount = useMemo(
+    () => paragraphs.filter((paragraph) => !paragraph.finalized && paragraph.reviewUpdatedAt > (paragraph.syncedAt ?? 0)).length,
+    [paragraphs],
+  )
+  const libraryFinalizedCount = libraryParagraphs.filter((paragraph) => paragraph.finalized).length
   const sections = useMemo(() => Array.from(new Set(paragraphs.map((paragraph) => paragraph.section))), [paragraphs])
   const paragraphCommentCounts = useMemo(() => comments.reduce<Record<string, number>>((acc, comment) => {
     acc[comment.paragraphId] = (acc[comment.paragraphId] ?? 0) + 1
@@ -59,6 +68,8 @@ export default function App() {
     window.addEventListener('beforeunload', handleBeforeUnload)
     return () => window.removeEventListener('beforeunload', handleBeforeUnload)
   }, [dirty])
+
+  useEffect(() => { void loadLibrary() }, [loadLibrary])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -136,6 +147,13 @@ export default function App() {
           <Button icon={<UndoOutlined />} disabled={!useReviewStore.getState().past.length} onClick={undo} />
           <Button icon={<RedoOutlined />} disabled={!useReviewStore.getState().future.length} onClick={redo} />
           <Button danger={conflicts.length > 0} icon={<SwapOutlined />} onClick={() => void handleMockConflict()}>模拟冲突</Button>
+          <Badge count={pendingSyncCount} size="small" offset={[-4, 4]}>
+            <Button icon={<SyncOutlined />} loading={syncPhase === 'syncing'} onClick={() => void syncWithLibrary()}>与稿库同步</Button>
+          </Badge>
+          {syncPhase === 'failed' && <Button danger icon={<ReloadOutlined />} onClick={() => void retrySync()}>重试同步</Button>}
+          <Badge dot={syncPhase === 'failed'}>
+            <Button icon={<DatabaseOutlined />} onClick={() => setLibraryOpen(true)}>稿库查询</Button>
+          </Badge>
         </Space>
       </header>
 
@@ -162,6 +180,14 @@ export default function App() {
         </div>
       )}
 
+      {syncNotices.length > 0 && (
+        <div className="sync-stack">
+          {syncNotices.map((notice) => (
+            <Alert key={notice.id} type={notice.type} showIcon closable message={notice.message} onClose={() => dismissSyncNotice(notice.id)} />
+          ))}
+        </div>
+      )}
+
       <main className="workspace">
         <aside className="toc-panel">
           <div className="panel-title"><MenuFoldOutlined /> 侧边目录</div>
@@ -184,6 +210,9 @@ export default function App() {
             <div className="panel-title"><HistoryOutlined /> 版本</div>
             <Input value={versionLabel} onChange={(event) => setVersionLabel(event.target.value)} placeholder="新版本名称" onPressEnter={handleCreateVersion} />
             <Button block icon={<PlusOutlined />} onClick={handleCreateVersion}>保存当前版本</Button>
+            {role === 'editor' && (
+              <Button block type="primary" ghost icon={<CloudUploadOutlined />} onClick={() => { void publishLibraryVersion(versionLabel); setVersionLabel(''); message.success('稿库新版本已发布') }}>发布稿库版本</Button>
+            )}
             <Button block icon={<DiffOutlined />} onClick={() => setVersionOpen(true)}>比较两个版本</Button>
           </div>
         </aside>
@@ -213,6 +242,11 @@ export default function App() {
                       <span>段落 {paragraph.number.replace('.', '')}</span>
                       {paragraph.status === 'locked' && <Tag icon={<LockOutlined />} color="purple">已锁定</Tag>}
                       {paragraph.status === 'accepted' && <Tag icon={<CheckOutlined />} color="green">已确认</Tag>}
+                      {paragraph.finalized
+                        ? <Tag icon={<DatabaseOutlined />} color="geekblue">稿库定稿{paragraph.reviewUpdatedAt > (paragraph.syncedAt ?? 0) ? ' · 审阅台有改动' : ''}</Tag>
+                        : paragraph.reviewUpdatedAt > (paragraph.syncedAt ?? 0)
+                          ? <Tag color="gold">审阅台改动 · 待同步</Tag>
+                          : <Tag>审阅台</Tag>}
                       {!!paragraphCommentCounts[paragraph.id] && <Tag icon={<MessageOutlined />}>{paragraphCommentCounts[paragraph.id]} 条意见</Tag>}
                     </div>
                     {revisionMode ? (
@@ -228,7 +262,10 @@ export default function App() {
                     <div className="paragraph-actions">
                       {role === 'reviewer' && <><Button size="small" icon={<CommentOutlined />} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openComposer('comment') }}>添加批注</Button><Button size="small" icon={<FileDoneOutlined />} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openComposer('suggestion') }}>提出建议</Button></>}
                       {role === 'editor' && <Button size="small" icon={paragraph.status === 'locked' ? <UnlockOutlined /> : <LockOutlined />} onClick={(event) => { event.stopPropagation(); toggleLock(paragraph.id) }}>{paragraph.status === 'locked' ? '解除锁定' : '锁定段落'}</Button>}
-                      {role === 'author' && <span className="author-tip">可直接修改正文，右侧逐条处理建议</span>}
+                      {role === 'editor' && !paragraph.finalized && <Button size="small" type="primary" ghost icon={<CheckOutlined />} onClick={(event) => { event.stopPropagation(); void finalizeInLibrary(paragraph.id); message.success('已定稿到稿库') }}>定稿到稿库</Button>}
+                      {role === 'author' && (paragraph.finalized && paragraph.reviewUpdatedAt > (paragraph.syncedAt ?? 0)
+                        ? <span className="author-tip">该段已在稿库定稿，同步后以稿库版本为准，批注建议不受影响</span>
+                        : <span className="author-tip">可直接修改正文，右侧逐条处理建议</span>)}
                     </div>
                   </article>
                 ))}
@@ -303,9 +340,55 @@ export default function App() {
         </div>
       </Modal>
 
+      <Modal title="稿库查询" open={libraryOpen} onCancel={() => setLibraryOpen(false)} footer={null} width={760}>
+        <p className="library-hint">稿库定稿内容独立于审阅台保存；与稿库对接失败时，已定稿内容仍可在此照常查询，重试只补没推上去的一侧。</p>
+        <div className="library-section-title">已定稿段落（{libraryFinalizedCount}）</div>
+        {libraryParagraphs.filter((item) => item.finalized).length === 0
+          ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="稿库暂无定稿段落" />
+          : (
+            <div className="library-list">
+              {libraryParagraphs.filter((item) => item.finalized).map((item) => {
+                const paragraph = paragraphs.find((candidate) => candidate.id === item.paragraphId)
+                return (
+                  <div key={item.paragraphId} className="library-item">
+                    <div className="library-item-head">
+                      <b>{paragraph?.number ?? item.paragraphId}</b>
+                      <Tag color="geekblue">稿库定稿</Tag>
+                      {item.finalizedAt && <small>{formatDate(item.finalizedAt)}</small>}
+                    </div>
+                    <p>{item.text}</p>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        <div className="library-section-title">稿库版本（{libraryVersions.length}）</div>
+        {libraryVersions.length === 0
+          ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="稿库暂无发布版本" />
+          : (
+            <div className="library-list">
+              {libraryVersions.map((version) => (
+                <div key={version.id} className="library-item">
+                  <div className="library-item-head">
+                    <b>{version.label}</b>
+                    <Tag>{version.paragraphIds.length} 段</Tag>
+                    <small>{formatDate(version.createdAt)} · {version.publishedBy}</small>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+      </Modal>
+
       <footer className="app-footer">
-        <span>本地草稿自动持久化 · 模拟接口用于演示多人修改后的冲突处理</span>
-        <Button type="text" size="small" icon={<DeleteOutlined />} onClick={() => { resetDemo(); message.success('已重置示例数据') }}>重置示例</Button>
+        <span>本地草稿自动持久化 · 模拟接口演示多人冲突与稿库同步</span>
+        <Space size={14}>
+          <Space size={6}>
+            <Switch size="small" checked={pushFailureArmed} onChange={setPushFailureArmed} />
+            <span>模拟稿库对接失败</span>
+          </Space>
+          <Button type="text" size="small" icon={<DeleteOutlined />} onClick={() => { resetDemo(); message.success('已重置示例数据') }}>重置示例</Button>
+        </Space>
       </footer>
     </div>
   )
