@@ -94,6 +94,26 @@ kbd { padding: 1px 4px; border: 1px solid #706158; border-radius: 3px; color: #f
 .version-row.changed { background: #fff9ec; }
 .composer { display: grid; gap: 8px; }
 .composer label { margin-top: 5px; color: #695e55; font-size: 11px; font-weight: 700; }
+.sync-status { margin-inline-end: 0; cursor: default; }
+.paragraph-card.finalized { background: #f0f5fb; border-color: #c6d8ef; }
+.attribution-tag { padding: 1px 6px; border: 1px solid #ddd3c7; border-radius: 99px; color: #8b7d72; background: #faf6f0; font-size: 9px; cursor: default; }
+.repo-section { margin-bottom: 20px; }
+.repo-revision { margin-left: 6px; color: #9a8d81; font-weight: 400; text-transform: none; }
+.repo-list { display: grid; gap: 8px; }
+.repo-paragraph { padding: 9px 11px; border: 1px solid #e4ddd4; border-radius: 7px; background: #fffefa; }
+.repo-paragraph.finalized { border-color: #c6d8ef; background: #f5f9fe; }
+.repo-paragraph-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: #8b7d72; font-size: 10px; }
+.repo-paragraph-meta b { color: #7b3f2f; font-family: Georgia, serif; }
+.repo-attribution { color: #a29488; }
+.repo-paragraph p { margin: 6px 0 0; color: #403a35; font-family: Georgia, "Songti SC", serif; font-size: 12px; line-height: 1.7; }
+.repo-empty { margin: 4px 0; color: #9a8d81; font-size: 11px; }
+.outbox-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.sync-log { display: grid; gap: 6px; max-height: 260px; overflow: auto; }
+.sync-log-entry { display: grid; grid-template-columns: 74px 1fr; gap: 8px; padding: 6px 8px; border-left: 3px solid #c9beb4; border-radius: 4px; background: #f7f4ef; }
+.sync-log-entry.success { border-left-color: #3b8c67; }
+.sync-log-entry.error { border-left-color: #bd5c53; }
+.sync-log-entry span { color: #9a8d81; font-size: 9px; }
+.sync-log-entry p { margin: 0; color: #4d4640; font-size: 11px; line-height: 1.5; }
 .app-footer { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; height: 42px; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; color: #a99d92; background: #29241f; font-size: 10px; }
 @media (max-width: 1220px) {
   .workspace { grid-template-columns: 210px minmax(540px, 1fr) 352px; }

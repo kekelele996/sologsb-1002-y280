@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowLeftOutlined, ArrowRightOutlined, BranchesOutlined, CheckOutlined, CloseOutlined,
-  CommentOutlined, DiffOutlined, DeleteOutlined, FileDoneOutlined, FileTextOutlined,
-  HistoryOutlined, LockOutlined, MenuFoldOutlined, MessageOutlined, PlusOutlined,
-  RedoOutlined, SaveOutlined, SendOutlined, SwapOutlined, UndoOutlined, UnlockOutlined, UserSwitchOutlined,
+  CommentOutlined, DiffOutlined, DeleteOutlined, DisconnectOutlined, FileDoneOutlined, FileProtectOutlined,
+  FileTextOutlined, CloudServerOutlined, CloudSyncOutlined, HistoryOutlined, LockOutlined, MenuFoldOutlined,
+  MessageOutlined, PlusOutlined, RedoOutlined, SaveOutlined, SendOutlined, SwapOutlined, UndoOutlined,
+  UnlockOutlined, UserSwitchOutlined,
 } from '@ant-design/icons'
-import { Alert, Badge, Button, Card, Checkbox, Divider, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, message } from 'antd'
+import { Alert, Badge, Button, Card, Checkbox, Collapse, Divider, Drawer, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, message } from 'antd'
 import { submitRemotePatch } from './services/mockApi'
 import { useReviewStore } from './store/review'
 import type { Comment, CommentType, Paragraph, Role } from './types'
@@ -13,7 +14,7 @@ import type { Comment, CommentType, Paragraph, Role } from './types'
 const roleMeta: Record<Role, { label: string; description: string; color: string }> = {
   author: { label: '作者工作区', description: '编辑正文，逐条接受或拒绝修改建议', color: '#2f6f5e' },
   reviewer: { label: '审稿人工作区', description: '引用原文、添加批注与修改建议并参与讨论', color: '#9a5b25' },
-  editor: { label: '编辑工作区', description: '合并重复意见、锁定已确认段落并比较版本', color: '#5b4d8e' },
+  editor: { label: '编辑工作区', description: '合并重复意见、锁定段落、在稿库定稿并出新版本', color: '#5b4d8e' },
 }
 const roleIcon = (role: Role) => role === 'author' ? <FileDoneOutlined /> : role === 'reviewer' ? <CommentOutlined /> : <BranchesOutlined />
 const formatDate = (value: number) => new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
@@ -21,8 +22,10 @@ const formatDate = (value: number) => new Date(value).toLocaleString('zh-CN', { 
 export default function App() {
   const {
     role, paragraphs, comments, versions, selectedParagraphId, commentFilter, revisionMode, dirty, conflicts,
+    repository, outbox, syncStatus, syncError, lastSyncAt, repoOffline, syncLog,
     setRole, selectParagraph, setCommentFilter, setRevisionMode, updateParagraph, addComment, replyComment,
     resolveSuggestion, mergeComment, toggleLock, createVersion, addConflict, resolveConflict, dismissConflict,
+    syncWithRepository, retrySync, finalizeParagraph, unfinalizeParagraph, publishJournalVersion, setRepoOffline,
     undo, redo, save, resetDemo,
   } = useReviewStore()
   const [composerOpen, setComposerOpen] = useState(false)
@@ -35,6 +38,7 @@ export default function App() {
   const [versionA, setVersionA] = useState(versions[1]?.id ?? versions[0]?.id)
   const [versionB, setVersionB] = useState(versions[0]?.id)
   const [versionLabel, setVersionLabel] = useState('')
+  const [repoOpen, setRepoOpen] = useState(false)
 
   const selected = paragraphs.find((paragraph) => paragraph.id === selectedParagraphId) ?? paragraphs[0]
   const sections = useMemo(() => Array.from(new Set(paragraphs.map((paragraph) => paragraph.section))), [paragraphs])
@@ -49,6 +53,18 @@ export default function App() {
     if (commentFilter === 'duplicate') return duplicateParagraphIds.has(comment.paragraphId) && comment.status === 'open'
     return true
   }).sort((a, b) => b.createdAt - a.createdAt), [commentFilter, comments, duplicateParagraphIds])
+
+  const syncMeta = useMemo(() => {
+    if (syncStatus === 'syncing') return { color: 'processing', text: '对接中…' }
+    if (syncStatus === 'error') return { color: 'error', text: outbox.length ? `对接失败 · 待补推 ${outbox.length} 项` : '对接失败' }
+    if (outbox.length > 0) return { color: 'gold', text: `待对接 ${outbox.length} 项` }
+    if (lastSyncAt) return { color: 'success', text: `已对接 ${formatDate(lastSyncAt)}` }
+    return { color: 'default', text: '未对接' }
+  }, [syncStatus, outbox.length, lastSyncAt])
+
+  useEffect(() => {
+    void useReviewStore.getState().syncWithRepository()
+  }, [])
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -117,6 +133,25 @@ export default function App() {
     setVersionLabel('')
     message.success('当前版本已保存')
   }
+  const handleSync = async () => {
+    const state = useReviewStore.getState()
+    if (state.syncStatus === 'error' && state.outbox.length > 0) await retrySync()
+    else await syncWithRepository()
+    const after = useReviewStore.getState()
+    if (after.syncStatus === 'error') message.warning(after.syncError ?? '对接失败，改动已留在审阅台等待重试')
+    else message.success('与期刊稿库对接完成')
+  }
+  const handleFinalize = async (paragraph: Paragraph) => {
+    const ok = paragraph.finalized ? await unfinalizeParagraph(paragraph.id) : await finalizeParagraph(paragraph.id)
+    if (!ok) { message.error('稿库连接失败，操作未生效'); return }
+    message.success(paragraph.finalized ? '已取消定稿，此后该段以审阅台为准' : '已在稿库定稿，此后该段以稿库为准')
+  }
+  const handlePublishJournal = async () => {
+    const ok = await publishJournalVersion(versionLabel.trim())
+    if (!ok) { message.error('稿库连接失败，版本未发布'); return }
+    setVersionLabel('')
+    message.success('稿库新版本已发布')
+  }
   const comparedA = versions.find((version) => version.id === versionA)
   const comparedB = versions.find((version) => version.id === versionB)
   const comparedRows = comparedA && comparedB ? comparedA.paragraphs.map((paragraph, index) => ({ a: paragraph, b: comparedB.paragraphs[index] })) : []
@@ -136,13 +171,24 @@ export default function App() {
           <Button icon={<UndoOutlined />} disabled={!useReviewStore.getState().past.length} onClick={undo} />
           <Button icon={<RedoOutlined />} disabled={!useReviewStore.getState().future.length} onClick={redo} />
           <Button danger={conflicts.length > 0} icon={<SwapOutlined />} onClick={() => void handleMockConflict()}>模拟冲突</Button>
+          <Divider type="vertical" />
+          <Tooltip title={syncError || '审阅台与期刊稿库各存一份正文，点击进行双向对接'}>
+            <Tag className="sync-status" color={syncMeta.color}>{syncMeta.text}</Tag>
+          </Tooltip>
+          <Button icon={<CloudSyncOutlined />} loading={syncStatus === 'syncing'} onClick={() => void handleSync()}>
+            {syncStatus === 'error' && outbox.length > 0 ? `重试补推 ${outbox.length} 项` : '对接稿库'}
+          </Button>
+          <Tooltip title={repoOffline ? '恢复稿库连接' : '模拟稿库断连：写入失败，已定稿内容照旧可查'}>
+            <Button icon={<DisconnectOutlined />} danger={repoOffline} type={repoOffline ? 'primary' : 'default'} onClick={() => setRepoOffline(!repoOffline)} />
+          </Tooltip>
+          <Button icon={<CloudServerOutlined />} onClick={() => setRepoOpen(true)}>稿库</Button>
         </Space>
       </header>
 
       <div className="role-banner" style={{ '--role-color': roleMeta[role].color } as React.CSSProperties}>
         <span className="role-badge">{roleIcon(role)} {roleMeta[role].label}</span>
         <span>{roleMeta[role].description}</span>
-        <span className="paper-state"><FileTextOutlined /> 论文正文 v2.4</span>
+        <span className="paper-state"><FileTextOutlined /> 论文正文 v2.4 · 已定稿以稿库为准，未定稿以审阅台为准</span>
       </div>
 
       {conflicts.length > 0 && (
@@ -173,7 +219,8 @@ export default function App() {
                   <button key={paragraph.id} className={paragraph.id === selected?.id ? 'active' : ''} onClick={() => scrollToParagraph(paragraph.id)}>
                     <span>{paragraph.number}</span>
                     <span>{paragraph.text.slice(0, 24)}…</span>
-                    {paragraph.status === 'locked' && <LockOutlined />}
+                    {paragraph.finalized && <FileProtectOutlined />}
+                    {!paragraph.finalized && paragraph.status === 'locked' && <LockOutlined />}
                     {!!paragraphCommentCounts[paragraph.id] && <Badge count={paragraphCommentCounts[paragraph.id]} size="small" />}
                   </button>
                 ))}
@@ -185,6 +232,11 @@ export default function App() {
             <Input value={versionLabel} onChange={(event) => setVersionLabel(event.target.value)} placeholder="新版本名称" onPressEnter={handleCreateVersion} />
             <Button block icon={<PlusOutlined />} onClick={handleCreateVersion}>保存当前版本</Button>
             <Button block icon={<DiffOutlined />} onClick={() => setVersionOpen(true)}>比较两个版本</Button>
+            {role === 'editor' && (
+              <Tooltip title="把当前稿库正文快照为新期刊版本">
+                <Button block type="primary" ghost icon={<CloudServerOutlined />} onClick={() => void handlePublishJournal()}>出稿库新版本</Button>
+              </Tooltip>
+            )}
           </div>
         </aside>
 
@@ -205,15 +257,21 @@ export default function App() {
                 {paragraphs.filter((paragraph) => paragraph.section === section).map((paragraph) => (
                   <article
                     id={`paragraph-${paragraph.id}`} key={paragraph.id} onMouseUp={() => setQuote(window.getSelection()?.toString().trim() ?? '')}
-                    className={`paragraph-card ${paragraph.id === selected?.id ? 'selected' : ''} ${paragraph.highlighted ? 'highlighted' : ''} ${paragraph.status === 'locked' ? 'locked' : ''}`}
+                    className={`paragraph-card ${paragraph.id === selected?.id ? 'selected' : ''} ${paragraph.highlighted ? 'highlighted' : ''} ${paragraph.status === 'locked' ? 'locked' : ''} ${paragraph.finalized ? 'finalized' : ''}`}
                     onClick={() => selectParagraph(paragraph.id)}
                   >
                     <div className="paragraph-meta">
                       <span className="paragraph-no">{paragraph.number}</span>
                       <span>段落 {paragraph.number.replace('.', '')}</span>
-                      {paragraph.status === 'locked' && <Tag icon={<LockOutlined />} color="purple">已锁定</Tag>}
-                      {paragraph.status === 'accepted' && <Tag icon={<CheckOutlined />} color="green">已确认</Tag>}
+                      {paragraph.finalized && <Tag icon={<FileProtectOutlined />} color="geekblue">已定稿 · 以稿库为准</Tag>}
+                      {!paragraph.finalized && paragraph.status === 'locked' && <Tag icon={<LockOutlined />} color="purple">已锁定</Tag>}
+                      {!paragraph.finalized && paragraph.status === 'accepted' && <Tag icon={<CheckOutlined />} color="green">已确认</Tag>}
                       {!!paragraphCommentCounts[paragraph.id] && <Tag icon={<MessageOutlined />}>{paragraphCommentCounts[paragraph.id]} 条意见</Tag>}
+                      {paragraph.attribution && (
+                        <Tooltip title={`${paragraph.attribution.note ? `${paragraph.attribution.note} · ` : ''}${formatDate(paragraph.attribution.updatedAt)}`}>
+                          <span className="attribution-tag">归属 {paragraph.attribution.side === 'repository' ? '稿库' : '审阅台'}</span>
+                        </Tooltip>
+                      )}
                     </div>
                     {revisionMode ? (
                       <div className="revision-grid">
@@ -221,14 +279,19 @@ export default function App() {
                         <div><small>当前修订</small><p>{paragraph.text}</p></div>
                       </div>
                     ) : role === 'author' ? (
-                      <Input.TextArea autoSize={{ minRows: 2, maxRows: 8 }} value={paragraph.text} readOnly={paragraph.status === 'locked'} onChange={(event) => updateParagraph(paragraph.id, event.target.value)} />
+                      <Input.TextArea autoSize={{ minRows: 2, maxRows: 8 }} value={paragraph.text} readOnly={paragraph.status === 'locked' || paragraph.finalized} onChange={(event) => updateParagraph(paragraph.id, event.target.value)} />
                     ) : (
                       <p className="paragraph-text">{paragraph.text}</p>
                     )}
                     <div className="paragraph-actions">
                       {role === 'reviewer' && <><Button size="small" icon={<CommentOutlined />} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openComposer('comment') }}>添加批注</Button><Button size="small" icon={<FileDoneOutlined />} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openComposer('suggestion') }}>提出建议</Button></>}
                       {role === 'editor' && <Button size="small" icon={paragraph.status === 'locked' ? <UnlockOutlined /> : <LockOutlined />} onClick={(event) => { event.stopPropagation(); toggleLock(paragraph.id) }}>{paragraph.status === 'locked' ? '解除锁定' : '锁定段落'}</Button>}
-                      {role === 'author' && <span className="author-tip">可直接修改正文，右侧逐条处理建议</span>}
+                      {role === 'editor' && (
+                        <Button size="small" type={paragraph.finalized ? 'default' : 'primary'} ghost={!paragraph.finalized} icon={<FileProtectOutlined />} onClick={(event) => { event.stopPropagation(); void handleFinalize(paragraph) }}>
+                          {paragraph.finalized ? '取消定稿' : '定稿到稿库'}
+                        </Button>
+                      )}
+                      {role === 'author' && <span className="author-tip">{paragraph.finalized ? '该段已在稿库定稿，以稿库为准' : '可直接修改正文，右侧逐条处理建议'}</span>}
                     </div>
                   </article>
                 ))}
@@ -250,7 +313,7 @@ export default function App() {
             {visibleComments.map((comment) => {
               const paragraph = paragraphs.find((item) => item.id === comment.paragraphId)
               return (
-                <Card key={comment.id} size="small" className={`comment-card ${comment.status}`} title={<span>{comment.author} <Tag>{comment.type === 'suggestion' ? '修改建议' : '段落批注'}</Tag></span>} extra={<small>{formatDate(comment.createdAt)}</small>}>
+                <Card key={comment.id} size="small" className={`comment-card ${comment.status}`} title={<span>{comment.author} <Tag>{comment.type === 'suggestion' ? '修改建议' : '段落批注'}</Tag>{comment.origin === 'repository' && <Tag color="geekblue">来自稿库</Tag>}</span>} extra={<small>{formatDate(comment.createdAt)}</small>}>
                   <button className="quote-line" onClick={() => paragraph && scrollToParagraph(paragraph.id)}>“{comment.quote}” · 段落 {paragraph?.number}</button>
                   <p className="comment-body">{comment.body}</p>
                   {comment.suggestion && <div className="suggestion-box"><small>建议改为</small><p>{comment.suggestion}</p></div>}
@@ -262,7 +325,7 @@ export default function App() {
                     <Input size="small" value={replyDrafts[comment.id] ?? ''} onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: event.target.value }))} placeholder="回复讨论…" onPressEnter={() => { const body = replyDrafts[comment.id]?.trim(); if (body) { replyComment(comment.id, body); setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: '' })) } }} />
                     <Button size="small" type="text" icon={<SendOutlined />} onClick={() => { const body = replyDrafts[comment.id]?.trim(); if (body) { replyComment(comment.id, body); setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: '' })) } }} />
                   </div>
-                  {comment.status === 'open' && role === 'author' && comment.type === 'suggestion' && <div className="decision-row"><Button type="primary" size="small" icon={<CheckOutlined />} onClick={() => resolveSuggestion(comment.id, true)}>接受修改</Button><Button danger size="small" icon={<CloseOutlined />} onClick={() => resolveSuggestion(comment.id, false)}>拒绝</Button></div>}
+                  {comment.status === 'open' && role === 'author' && comment.type === 'suggestion' && !paragraph?.finalized && <div className="decision-row"><Button type="primary" size="small" icon={<CheckOutlined />} onClick={() => resolveSuggestion(comment.id, true)}>接受修改</Button><Button danger size="small" icon={<CloseOutlined />} onClick={() => resolveSuggestion(comment.id, false)}>拒绝</Button></div>}
                   {comment.status === 'open' && role === 'editor' && duplicateParagraphIds.has(comment.paragraphId) && (() => {
                     const sibling = comments.find((item) => item.id !== comment.id && item.paragraphId === comment.paragraphId && item.status === 'open')
                     return sibling ? <Button size="small" type="dashed" icon={<BranchesOutlined />} onClick={() => mergeComment(comment.id, sibling.id)}>合并到“{sibling.author}”意见</Button> : null
@@ -303,8 +366,85 @@ export default function App() {
         </div>
       </Modal>
 
+      <Drawer title={<span><CloudServerOutlined /> 期刊稿库</span>} placement="right" width={560} open={repoOpen} onClose={() => setRepoOpen(false)}>
+        {repoOffline && <Alert style={{ marginBottom: 12 }} type="warning" showIcon message="稿库连接已断开（模拟）" description="展示审阅台缓存的最近快照：已定稿内容照旧可查，未上去的改动留在审阅台等待重试。" />}
+        <Alert style={{ marginBottom: 16 }} type="info" showIcon message="对接规则" description="审阅台与稿库各存一份正文：已定稿段落以稿库为准，未定稿段落以审阅台为准；批注与建议并集合并、互不抹掉；稿库已定稿内容不被审阅台改动顶回。" />
+        {outbox.length > 0 && (
+          <Alert
+            style={{ marginBottom: 16 }} type="warning" showIcon message={`${outbox.length} 项改动未推送到稿库`}
+            description={(
+              <div>
+                <div className="outbox-list">
+                  {outbox.map((entry) => (
+                    <Tag key={`${entry.kind}-${entry.kind === 'paragraph' ? entry.paragraphId : entry.commentId}`}>
+                      {entry.kind === 'paragraph' ? `段落 ${paragraphs.find((item) => item.id === entry.paragraphId)?.number ?? entry.paragraphId}` : `意见 ${comments.find((item) => item.id === entry.commentId)?.quote?.slice(0, 12) || entry.commentId}`}
+                    </Tag>
+                  ))}
+                </div>
+                <Button size="small" type="primary" style={{ marginTop: 8 }} loading={syncStatus === 'syncing'} onClick={() => void retrySync().then(() => message.info('补推结束'))}>重试补推（只补稿库一侧）</Button>
+              </div>
+            )}
+          />
+        )}
+        <div className="repo-section">
+          <div className="panel-title"><FileTextOutlined /> 稿库正文 {repository && <span className="repo-revision">rev {repository.revision}</span>}</div>
+          {!repository && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未获取稿库快照" />}
+          <div className="repo-list">
+            {repository?.paragraphs.map((paragraph) => (
+              <div key={paragraph.id} className={`repo-paragraph ${paragraph.finalized ? 'finalized' : ''}`}>
+                <div className="repo-paragraph-meta">
+                  <b>{paragraph.number}</b>
+                  {paragraph.finalized
+                    ? <Tag icon={<FileProtectOutlined />} color="geekblue">已定稿{paragraph.finalizedBy ? ` · ${paragraph.finalizedBy}` : ''}</Tag>
+                    : <Tag>未定稿 · 以审阅台为准</Tag>}
+                  <span className="repo-attribution">归属 {paragraph.attribution.side === 'repository' ? '稿库' : '审阅台'} · {formatDate(paragraph.attribution.updatedAt)}{paragraph.attribution.note ? ` · ${paragraph.attribution.note}` : ''}</span>
+                </div>
+                <p>{paragraph.text}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="repo-section">
+          <div className="panel-title"><HistoryOutlined /> 稿库版本（编辑发布）</div>
+          {!repository?.versions.length && <p className="repo-empty">编辑尚未在稿库出新版本</p>}
+          <Collapse
+            size="small"
+            items={repository?.versions.map((version) => ({
+              key: version.id,
+              label: `${version.label} · ${formatDate(version.createdAt)} · ${version.paragraphs.filter((item) => item.finalized).length}/${version.paragraphs.length} 段已定稿`,
+              children: (
+                <div className="repo-list">
+                  {version.paragraphs.map((paragraph) => (
+                    <div key={paragraph.id} className={`repo-paragraph ${paragraph.finalized ? 'finalized' : ''}`}>
+                      <div className="repo-paragraph-meta"><b>{paragraph.number}</b>{paragraph.finalized ? <Tag color="geekblue">已定稿</Tag> : <Tag>未定稿</Tag>}</div>
+                      <p>{paragraph.text}</p>
+                    </div>
+                  ))}
+                </div>
+              ),
+            })) ?? []}
+          />
+        </div>
+        <div className="repo-section">
+          <div className="panel-title"><CommentOutlined /> 稿库已收意见 {repository ? `${repository.comments.length} 条` : ''}</div>
+          <p className="repo-empty">审阅台的批注与建议对接后汇入稿库；本地意见在审阅台原样保留，互不顺手抹掉。</p>
+        </div>
+        <div className="repo-section">
+          <div className="panel-title"><UserSwitchOutlined /> 对接日志</div>
+          <div className="sync-log">
+            {syncLog.map((entry) => (
+              <div key={entry.id} className={`sync-log-entry ${entry.level}`}>
+                <span>{formatDate(entry.at)}</span>
+                <p>{entry.message}</p>
+              </div>
+            ))}
+            {!syncLog.length && <p className="repo-empty">暂无对接记录</p>}
+          </div>
+        </div>
+      </Drawer>
+
       <footer className="app-footer">
-        <span>本地草稿自动持久化 · 模拟接口用于演示多人修改后的冲突处理</span>
+        <span>本地草稿自动持久化 · 期刊稿库双向对接：已定稿以稿库为准，未定稿以审阅台为准，失败留待重试</span>
         <Button type="text" size="small" icon={<DeleteOutlined />} onClick={() => { resetDemo(); message.success('已重置示例数据') }}>重置示例</Button>
       </footer>
     </div>
